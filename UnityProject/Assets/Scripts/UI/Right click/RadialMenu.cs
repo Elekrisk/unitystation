@@ -1,233 +1,363 @@
 ﻿using System.Collections;
 using System.Collections.Generic;
+using System.Linq;
 using UnityEngine;
 
-public class RadialMenu : MonoBehaviour {
-
-	public Vector2 centercirlce = new Vector2(0.5f,0.5f);
-
-	public Dictionary<int,RadialButton> ResetDepthOnDestroy = new Dictionary<int,RadialButton>();
+// All angle variables are in radians, except serialized fields.
+// Comments use degrees for ease of understanding.
 
 
-	public Dictionary<int,List<RadialButton>> CurrentOptionsDepth = new Dictionary<int,List<RadialButton>>();
+public class RadialMenu : MonoBehaviour
+{
+	/// <summary>
+	/// The center of the menu.
+	/// </summary>
+	Vector2 menuCenter;
+	bool initialized = false;
 
-	public Dictionary<int,List<RightClickMenuItem>> DepthMenus = new Dictionary<int,List<RightClickMenuItem>>();
+	[SerializeField]
+	[Tooltip("The minimum distance between buttons, in pixels.")]
+	private float minimumButtonDistance = 80;
 
-	public Dictionary<int,int> Density = new  Dictionary<int,int>(){
-		{100,6},
-		{200,15},
-		{300,32},
-		{400,64},
-		{500,128}
+	[SerializeField]
+	[Tooltip("The maximum angle between the leftmost and rightmost buttons, in degrees. " +
+		"This does not apply to buttons with depth 0. " +
+		"Should always be 360 or below.")]
+	private float maximumButtonAngleRange = 360f * 2 / 3;
 
-	};
+	[SerializeField]
+	[Tooltip("The base prefab to use for buttons.")]
+	private RadialButton buttonPrefab;
 
-	public int CurrentMenuDepth;
-	public RadialButton ButtonPrefab;
+	[SerializeField]
+	[Tooltip("The distance between layers of buttons.")]
+	private float layerDistance = 100f;
 
-	public RadialButton Selected;
+	/// <summary>
+	/// A reference to the last selected button, or null if none previously selected.
+	/// </summary>
+	//private RadialButton lastSelectedButton = null;
 
-	public Vector2 MousePosition;
-	public Vector2 toVector2M;
+	/// <summary>
+	/// The depth of the deepest button layer.
+	/// </summary>
+	private int MaximumDepth => buttonLayers.Count - 1;
 
-	public float LastInRangeSubMenu;
+	private List<ButtonLayer> buttonLayers = new List<ButtonLayer>();
 
-	public RadialButton LastSelected;
+	/// <summary>
+	/// The UIManager's scale, used for correctly getting distances
+	/// </summary>
+	private float scale;
 
+	/// <summary>
+	/// Class used for storing radial buttons and placement information.
+	/// </summary>
+	public class ButtonLayer
+	{
+		/// <summary>
+		/// A list containing the buttons in this layer.
+		/// </summary>
+		public List<RadialButton> Buttons;
+		/// <summary>
+		/// The angle where the center of the layer should be placed.
+		/// </summary>
+		public float Angle;
+		/// <summary>
+		/// The angle between the left and right edges of the button placement area.
+		/// Buttons are not placed at the edges of the range, but distributed so that
+		/// if the range where to loop (e.g. a full circle), all buttons are an equal
+		/// distance from each other.
+		/// </summary>
+		public float Range;
+		/// <summary>
+		/// The currently selected button in the layer, if any.
+		/// </summary>
+		public RadialButton SelectedButton = null;
 
-	public bool LastSelectedset = false;
-	public bool Initialised = false;
+		/// <summary>
+		/// The distance between neighbouring buttons, in radians.
+		/// </summary>
+		public float ButtonDistance => Range / Buttons.Count;
 
-	public Dictionary<int,List<float>> SelectionRange = new Dictionary<int,List<float>>();
-	public int MenuItem;
-
-	public float LastSelectedTime;
-
-	public void SetupMenu (List<RightClickMenuItem> ListRightclick) {
-		//Captures the centre circle
-		centercirlce = new Vector2 (CommonInput.mousePosition.x, CommonInput.mousePosition.y);
-		SpawnButtons (ListRightclick,100,0);
-
+		public ButtonLayer(List<RadialButton> buttons, float angle, float range)
+		{
+			Buttons = buttons;
+			Angle = angle;
+			Range = range;
+		}
 	}
-	public void SpawnButtons (List<RightClickMenuItem> Menus,int Menudepth,int StartingAngle) {
-		Initialised = false;
-		CurrentMenuDepth = Menudepth;
-		int Range = 360; //is the range that the buttons will be on in degrees
-		int MinimumAngle = 0; //The initial offset Of the buttons in degrees
-		int MaximumAngle = 360; //Linked to range
-		if (Menudepth > 100) {
-			Range = Menus.Count * (360 / Density [Menudepth]); //Try and keep the icons nicely spaced on the outer rings
-			MinimumAngle = (int)(StartingAngle - ((Range / 2) - (0.5f * (360 / Density [Menudepth]))));
-			MaximumAngle = StartingAngle + Range;
+	/// <summary>
+	/// Sets the menu up, i.e. instantiates the buttons into the scene.
+	/// </summary>
+	/// <param name="items">A list of buttons to spawn.</param>
+	public void SetupMenu(List<RightClickMenuItem> items)
+	{
+		// Set the center of the menu to the cursor's position,
+		// to make the menu appear around the mouse.
+		menuCenter = new Vector2(CommonInput.mousePosition.x, CommonInput.mousePosition.y);
 
-			if (Range < (SelectionRange [Menudepth - 100] [0] / SelectionRange [Menudepth - 100] [3])) {
-				Range = (int)(SelectionRange [Menudepth - 100] [0] / SelectionRange [Menudepth - 100] [3]); //Try and keep the icons nicely spaced on the outer rings
-				MinimumAngle = (int)(StartingAngle - ((Range / 2) - (0.5f * (Range / Menus.Count))));
-				MaximumAngle = StartingAngle + Range;
-			}
+		GameObject uiManager = GameObject.Find("UIManager");
+		// Hoping that the UIManager's scale always is equal in x and y
+		scale = uiManager.transform.localScale.x;
+
+		SpawnButtons(items, 0, 0);
+
+		initialized = true;
+	}
+
+	/// <summary>
+	/// Instantiates buttons at the specified depth, using placement information
+	/// from the buttons one layer below the specified depth.
+	/// </summary>
+	/// <param name="items">A list of buttons to spawn.</param>
+	/// <param name="depth">The depth at which items will be spawned. Must not be negative.</param>
+	public void SpawnButtons(List<RightClickMenuItem> items, int depth, float parentAngle)
+	{
+		float angle = parentAngle; // Angle of center of items
+		float range; // Range of angles of items
+
+		if (depth > 0)
+		{
+			ButtonLayer parentButtons = buttonLayers[depth - 1];
+			// Requested range
+			range = parentButtons.Range / parentButtons.Buttons.Count;
+			// The absolute minimum range required.
+			float minRange = items.Count * (minimumButtonDistance / ((depth + 1) * layerDistance));
+			//Debug.Log($"Min button distance: {minimumButtonDistance}, degree version: {minimumButtonDistance / (depth * layerDistance) * Mathf.Rad2Deg}");
+			//Debug.Log($"Total minimum range: {minRange * Mathf.Rad2Deg}");
+			// The max range, set by serialized field.
+			float maxRange = maximumButtonAngleRange * Mathf.Deg2Rad;
+			// Range is clamped between max and min range, but if min range
+			// is larger than max range, min range has priority..
+			range = Mathf.Min(range, maxRange);
+			range = Mathf.Max(range, minRange);
+		}
+		else
+		{
+			// Range of items in level 0 is a full circle.
+			range = Mathf.PI * 2;
 		}
 
-		for (var i = 0; i < Menus.Count; i++) {
-			RadialButton newButton = Instantiate (ButtonPrefab) as RadialButton;
-			newButton.transform.SetParent (transform, false);
-			//Magic maths
-			float theta = (float)(((Range*Mathf.Deg2Rad) / Menus.Count) * i);
-			theta = (theta + (MinimumAngle * Mathf.Deg2Rad));
-			float xpos = Mathf.Sin (theta);
-			float ypos = Mathf.Cos (theta);
-			newButton.transform.localPosition = new Vector2 (xpos, ypos) * Menudepth;
+		// Angle distance between buttons, protected against division by zero
+		float angleDistance = items.Count > 0 ? range / items.Count : range;
+		// Start angle of buttons, i.e. angle of leftmost button
+		float startAngle = angle - range / 2;
 
-			newButton.Circle.color = Menus[i].BackgroundColor;
-			newButton.Icon.sprite = Menus[i].IconSprite;
-			if (Menus[i].BackgroundSprite != null)
+		// Temporary layer variable, so that buttons can be added to it in the loop below.
+		ButtonLayer newButtonLayer = new ButtonLayer(new List<RadialButton>(), angle, range);
+
+		for (var i = 0; i < items.Count; ++i)
+		{
+			RadialButton button = Instantiate(buttonPrefab, transform) as RadialButton;
+
+			// The button angle in the menu angle system (0° straight up, between -180° and 180°,
+			// positive clockwise)
+			float buttonAngle = startAngle + angleDistance * i + angleDistance / 2;
+			// The button angle, adjusted to the normal angle system (0° right,
+			// positive counter-clockwise) needed for getting coordinates
+			float actualButtonAngle = AdjustAngle(-buttonAngle, -Mathf.PI / 2);
+			Debug.Log($"Radial button {i}: {items[i].Label} angle: {buttonAngle}");
+			float distance = layerDistance * (depth + 1);
+			float xPos = Mathf.Cos(actualButtonAngle);
+			float yPos = Mathf.Sin(actualButtonAngle);
+			button.transform.localPosition = new Vector2(xPos, yPos) * distance;
+
+			// Set some properties on the button.
+			// These are mostly unchanged from the old radial menu.
+			button.Circle.color = items[i].BackgroundColor;
+			button.Icon.sprite = items[i].IconSprite;
+			if (items[i].BackgroundSprite != null)
 			{
-				newButton.Circle.sprite = Menus[i].BackgroundSprite;
+				button.Circle.sprite = items[i].BackgroundSprite;
 			}
 
-			newButton.MenuDepth = Menudepth;
-			newButton.Action = Menus[i].Action;
-			newButton.Hiddentitle = Menus[i].Label;
+			button.MenuDepth = depth;
+			button.Hiddentitle = items[i].Label;
 
-			newButton.MyMenu = this;
-
-			// Annoying dictionary not containing list when Initialised
-			if (CurrentOptionsDepth.ContainsKey (Menudepth)) {
-				CurrentOptionsDepth[Menudepth].Add (newButton);
-			} else {
-				CurrentOptionsDepth[Menudepth] = new List<RadialButton>();
-				CurrentOptionsDepth[Menudepth].Add (newButton);
-			}
-			if (DepthMenus.ContainsKey (Menudepth)) {
-				DepthMenus [Menudepth].Add (Menus [i]);
-			} else {
-				DepthMenus [Menudepth] = new List<RightClickMenuItem>();
-				DepthMenus [Menudepth].Add (Menus [i]);
-			}
-
+			// These are new:
+			button.MenuItem = items[i];
+			button.GlobalAngle = buttonAngle; // Save the angle for submenus
+			newButtonLayer.Buttons.Add(button);
 		}
-		//Pushes the parameters to the selection system
-		List<float> QuickList = new List<float> {
-			Range,MinimumAngle,MaximumAngle, Menus.Count
-		};
-		SelectionRange [Menudepth] = QuickList;
-		Initialised = true;
-
+		// Simple check for depth
+		if (buttonLayers.Count <= depth)
+		{
+			buttonLayers.Add(newButtonLayer);
+		}
 	}
 
-	void Update () {
-		if (Initialised) {
-			List<RadialButton> CurrentOptions = CurrentOptionsDepth [CurrentMenuDepth];
+	void Update()
+	{
+		if (initialized)
+		{
+			// Get mouse coordinates relative the menu center
+			Vector2 mousePos = new Vector2(CommonInput.mousePosition.x, CommonInput.mousePosition.y);
+			Vector2 relativeMenu = mousePos - menuCenter;
 
-			MousePosition = new Vector2 (CommonInput.mousePosition.x, CommonInput.mousePosition.y);
-			toVector2M = new Vector2 (CommonInput.mousePosition.x, CommonInput.mousePosition.y);
-			double IndividualItemDegrees = 0;
-			Vector2 Relativecentre = toVector2M - centercirlce;
-			//Logger.Log (Relativecentre.ToString ()+ " Relativecentre" , Category.RightClick);
-			double Angle = (Mathf.Atan2 (Relativecentre.y, Relativecentre.x) * Mathf.Rad2Deg);
-			//off sets the Angle because it starts as -180 to 180
-			Angle += -90;
-			Angle = Angle + SelectionRange[CurrentMenuDepth][1];
-			if (Angle > 0) {
-				Angle += -360;
+			// Get the angle from relative mouse coordinates and convert them to the same
+			// system as the buttons, i.e. 0° straight up, left being negative and right
+			// positive. The range should be from -180° to 180°.
+			float angle = AdjustAngle(-Mathf.Atan2(relativeMenu.y, relativeMenu.x), -Mathf.PI / 2);
+			//Debug.Log(angle);
+
+			// Compensate for UIManager's scale
+			float distance = relativeMenu.magnitude / scale;
+
+			// Get which layer the mouse is on. If the mouse is close to the center,
+			// layerDepth becomes -1.
+			int layerDepth = Mathf.RoundToInt((distance - layerDistance) / layerDistance);
+			// If the mouse is at a layer which does not exist, it should be clamped to the
+			// maximum depth.
+			layerDepth = Mathf.Min(layerDepth, MaximumDepth);
+			//Debug.Log(layerDepth);
+
+			// If the mouse is too far to the left or right to select a button in a layer,
+			// drop the layer depth by 1. Keep doing this until the mouse is above a button,
+			// or the depth reaches -1.
+			while (layerDepth > -1)
+			{
+				ButtonLayer selectedLayer = buttonLayers[layerDepth];
+				float relativeAngle = AdjustAngle(angle, selectedLayer.Angle);
+				if (Mathf.Abs(relativeAngle) > selectedLayer.Range / 2)
+				{
+					layerDepth -= 1;
+				}
+				else
+				{
+					break;
+				}
 			}
-			Angle = Angle * -1; //Turns it from negative to positive
 
-			//Logger.Log (Angle.ToString () + " old Angle", Category.RightClick);
-			//Logger.Log (((int)((Angle) / (SelectionRange[CurrentMenuDepth][0] / CurrentOptions.Count))).ToString () + " old MenuItem", Category.RightClick);
-			//Logger.Log (Angle.ToString ()+ " Angle" , Category.RightClick);
-			IndividualItemDegrees = SelectionRange[CurrentMenuDepth][0] / CurrentOptions.Count;
-			Angle = Angle + ((IndividualItemDegrees) / 2); //Offsets by half a menu so So the different selection areas aren't in the middle of the menu
-
-			if (Angle > 360) { //Makes sure it's 360
-				Angle += -360;
+			// If the mouse is close to the center, deselect all buttons.
+			if (layerDepth < 0)
+			{
+				for (int layer = MaximumDepth; layer >= 0; --layer)
+				{
+					DeselectButton(buttonLayers[layer]);
+				}
 			}
-
-			MenuItem = (int)((Angle) / (IndividualItemDegrees));
-
-			//Logger.Log ((IndividualItemDegrees).ToString () + " Density", Category.RightClick);
-			//Logger.Log (Angle.ToString () + " Angle", Category.RightClick);
-			//Logger.Log (SelectionRange[CurrentMenuDepth][0].ToString () + " Range", Category.RightClick);
-			//Logger.Log (SelectionRange[CurrentMenuDepth][1].ToString () + " MinimumAngle", Category.RightClick);
-			//Logger.Log (MenuItem.ToString () + "MenuItem", Category.RightClick);
-			//Logger.Log (CurrentOptions.Count.ToString () + "CurrentOptions.Count", Category.RightClick);
-
-			if (!(MenuItem > (CurrentOptions.Count - 1)) && !(MenuItem < 0)) { //Ensures its in range Of selection
-				LastInRangeSubMenu = Time.time;
-				Selected = CurrentOptions [MenuItem];
-				if (!(LastSelected == Selected)) {
-					if (LastSelectedset) {
-						if (LastSelected.MenuDepth == CurrentMenuDepth) {
-							LastSelected.title.text = "";
-							LastSelected.transform.SetSiblingIndex (LastSelected.DefaultPosition);
-							LastSelected.SetColour (LastSelected.DefaultColour);
-						} else {
-							ResetDepthOnDestroy [CurrentMenuDepth] = LastSelected;
-						}
-					}
-					CurrentOptions [MenuItem].title.text = CurrentOptions [MenuItem].Hiddentitle;
-					CurrentOptions [MenuItem].DefaultColour = CurrentOptions [MenuItem].ReceiveCurrentColour ();
-					CurrentOptions [MenuItem].DefaultPosition = CurrentOptions[MenuItem].transform.GetSiblingIndex();
-					CurrentOptions [MenuItem].SetColour (CurrentOptions [MenuItem].DefaultColour + (Color.white / 3f));
-					CurrentOptions [MenuItem].transform.SetAsLastSibling();
-					LastSelected = CurrentOptions [MenuItem];
-					LastSelectedset = true;
-					LastSelectedTime = Time.time;
-					//Logger.Log (LastSelectedTime.ToString (), Category.RightClick);
+			else
+			{
+				// Get the index of the selected item
+				ButtonLayer selectedLayer = buttonLayers[layerDepth];
+				// Transforms the angle to layer relative angle
+				float relativeAngle = AdjustAngle(angle, selectedLayer.Angle);
+				int itemIndex = (int)((relativeAngle + selectedLayer.Range / 2) / selectedLayer.ButtonDistance);
+				if (itemIndex < 0 || itemIndex >= selectedLayer.Buttons.Count)
+				{
+					// Should have already been handled in the while loop above
+					Debug.LogError("Item index outside bounds, should never happen!");
+					return;
 				}
-				if (LastSelectedset) {
-					if ((Time.time - LastSelectedTime) > 0.4f) { //How long it takes to make a menu
-
-						if ((!(DepthMenus [CurrentMenuDepth] [MenuItem].SubMenus == null)) && DepthMenus [CurrentMenuDepth] [MenuItem].SubMenus.Count > 0) {
-							Logger.Log (MenuItem.ToString () + " Selected", Category.RightClick);
-							int NewMenuDepth = CurrentMenuDepth;
-							LastSelectedTime = Time.time;
-							NewMenuDepth = NewMenuDepth + 100;
-							int InitialAngle = MenuItem * (360 / CurrentOptions.Count);
-
-							SpawnButtons (DepthMenus [CurrentMenuDepth] [MenuItem].SubMenus, NewMenuDepth, InitialAngle);
-						}
-					}
-
-				}
-			} else {
-				if ((Time.time - LastInRangeSubMenu) > 0.3f && (CurrentMenuDepth > 100)){ //How long it takes to exit a menu
-					//Logger.Log ("yo am Destroying", Category.UI);
-
-					if (ResetDepthOnDestroy.ContainsKey (CurrentMenuDepth))  {
-						ResetDepthOnDestroy [CurrentMenuDepth].title.text = "";
-						ResetDepthOnDestroy [CurrentMenuDepth].transform.SetSiblingIndex (ResetDepthOnDestroy [CurrentMenuDepth].DefaultPosition);
-						ResetDepthOnDestroy [CurrentMenuDepth].SetColour (ResetDepthOnDestroy [CurrentMenuDepth].DefaultColour);
-					} else {
-						LastSelected.transform.SetSiblingIndex(LastSelected.DefaultPosition);
-						LastSelected.SetColour(LastSelected.DefaultColour);
-						LastSelected.title.text = "";
-						LastSelected = null;
-						LastSelectedset = false;
-					}
-					List<RadialButton> Acopy = CurrentOptions;
-					for (int i = 0; i < Acopy.Count; i++) {
-						Destroy (CurrentOptions[i].gameObject);
-					}
-					//Cleans up the dictionarys
-					SelectionRange.Remove (CurrentMenuDepth);
-					CurrentOptionsDepth.Remove (CurrentMenuDepth);
-					DepthMenus.Remove (CurrentMenuDepth);
-					ResetDepthOnDestroy.Remove (CurrentMenuDepth);
-					CurrentMenuDepth = CurrentMenuDepth - 100;
-					LastSelectedset = false;
-				}
+				// Select the button, which handles opening and closing submenus of above layers
+				// and deselecting of buttons in above layers
+				SelectButton(selectedLayer, selectedLayer.Buttons[itemIndex]);
 			}
 		}
+
+		// On release, activate the selected button of the deepest layer and destroy
 		if (CommonInput.GetMouseButtonUp(1))
 		{
-			if (Selected)
+			if (buttonLayers[MaximumDepth].SelectedButton != null)
 			{
-				Selected.Action?.Invoke();
-				//Logger.Log ("yo this "+Selected.title.text , Category.RightClick);
+				buttonLayers[MaximumDepth].SelectedButton.MenuItem.Action?.Invoke();
 			}
-			LastSelectedset = false;
-			Destroy (gameObject);
+			Destroy(gameObject);
 		}
 	}
-}
 
+	/// <summary>
+	/// Selects the specified button in the specified layer, changing the button's appearance
+	/// and opening/closing submenus as needed.
+	/// </summary>
+	/// <param name="layer">The layer which the button resides in.</param>
+	/// <param name="button">The button which should be selected.</param>
+	private void SelectButton(ButtonLayer layer, RadialButton button)
+	{
+		// Prevent unneccesary reselection
+		if (layer.SelectedButton != button)
+		{
+			// Make sure no other button in this layer is selected
+			DeselectButton(layer);
+			// Change appearance
+			button.title.text = button.Hiddentitle;
+			button.DefaultColour = button.ReceiveCurrentColour();
+			button.DefaultPosition = button.transform.GetSiblingIndex();
+			button.SetColour(button.DefaultColour + (Color.white / 3f));
+			button.transform.SetAsLastSibling();
+
+			// Spawn submenus if applicable, one layer deeper with this buttons angle
+			if (button.HasSubMenus())
+			{
+				SpawnButtons(button.MenuItem.SubMenus, button.MenuDepth + 1, button.GlobalAngle);
+			}
+
+			layer.SelectedButton = button;
+		}
+		// Deselect all buttons in layers above this one
+		for (int depth = MaximumDepth; depth > button.MenuDepth; --depth)
+		{
+			DeselectButton(buttonLayers[depth]);
+		}
+	}
+
+	/// <summary>
+	/// Deselects the selected button in the specified layer, if any, changing it's appearance
+	/// and closes it's submenus, if applicable.
+	/// </summary>
+	/// <param name="buttonLayer">The layer whose selected button should be deselected.</param>
+	private void DeselectButton(ButtonLayer buttonLayer)
+	{
+		RadialButton button = buttonLayer.SelectedButton;
+		if (button != null)
+		{
+			// Reset appearance
+			button.title.text = "";
+			button.transform.SetSiblingIndex(button.DefaultPosition);
+			button.SetColour(button.DefaultColour);
+
+			// Delete all layers above this one
+			if (button.HasSubMenus())
+			{
+				DeleteLayer(button.MenuDepth + 1);
+			}
+
+			buttonLayer.SelectedButton = null;
+		}
+	}
+
+	/// <summary>
+	/// Deletes all layers with the specified depth and above
+	/// </summary>
+	/// <param name="layer">The index of the bottom layer to delete</param>
+	private void DeleteLayer(int layer)
+	{
+		while (MaximumDepth >= layer)
+		{
+			buttonLayers[layer].Buttons.ForEach(b => Destroy(b.gameObject));
+			buttonLayers.RemoveAt(layer);
+		}
+	}
+
+	/// <summary>
+	/// Adjust an angle in the range -180°, 180° to the same angle in the same range where
+	/// the angle is mapped so that when it equals direction, the result is 0°.
+	/// </summary>
+	/// <param name="angle">The angle to adjust.</param>
+	/// <param name="direction">The angle which will be mapped to 0.</param>
+	/// <returns>The mapped angle.</returns>
+	private float AdjustAngle(float angle, float direction)
+	{
+		angle -= direction;
+		if (angle > Mathf.PI)
+		{
+			angle -= Mathf.PI * 2;
+		}
+		else if (angle < -Mathf.PI)
+		{
+			angle += Mathf.PI * 2;
+		}
+		return angle;
+	}
+}

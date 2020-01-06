@@ -12,11 +12,13 @@ public class RadialButton : MonoBehaviour{
 	public Image Icon;
 	public Text title;
 	public string Hiddentitle;
-	public RadialMenu MyMenu;
 	public int DefaultPosition;
 	public Color DefaultColour;
 	public int MenuDepth;
 	public Action Action;
+
+	public RightClickMenuItem MenuItem;
+	public float GlobalAngle;
 
 	public void SetColour (Color Color)
 	{
@@ -27,6 +29,6 @@ public class RadialButton : MonoBehaviour{
 		return(Circle.color);
 	}
 
-
+	public bool HasSubMenus() => MenuItem.SubMenus != null && MenuItem.SubMenus.Count > 0;
 }
 
