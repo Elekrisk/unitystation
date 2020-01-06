@@ -6,7 +6,9 @@ using UnityEngine;
 // All angle variables are in radians, except serialized fields.
 // Comments use degrees for ease of understanding.
 
-
+/// <summary>
+/// A radial menu which appears when right clicking tiles.
+/// </summary>
 public class RadialMenu : MonoBehaviour
 {
 	/// <summary>
@@ -129,9 +131,11 @@ public class RadialMenu : MonoBehaviour
 			// The max range, set by serialized field.
 			float maxRange = maximumButtonAngleRange * Mathf.Deg2Rad;
 			// Range is clamped between max and min range, but if min range
-			// is larger than max range, min range has priority..
+			// is larger than max range, min range has priority.
 			range = Mathf.Min(range, maxRange);
 			range = Mathf.Max(range, minRange);
+			// Range should never be above 360°
+			range = Mathf.Min(range, Mathf.PI * 2);
 		}
 		else
 		{
